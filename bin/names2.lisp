@@ -23,6 +23,63 @@
 ;; 		  (directory #P"../udp/100*.conllu")
 ;; 		  :initial-value nil)))
 
+(defun names-from-list (sentences name-list)
+  "Finds and exhibit names from NAMES-LIST found in sentences elements
+of SENTENCES."
+  (process-pattern-in-sentences
+   sentences
+   (lambda (sentence)
+     (remove nil
+	     (mapcar
+	      #'(lambda (name-range)
+		  (string-range-to-token-list
+		   sentence
+		   name-range))
+	      (filter-names
+	       (find-names-in-sentence
+		sentence
+		name-list)))))
+   (lambda (tks)
+     (mapcar
+      #'(lambda (tk)
+	  (with-slots
+		(list id form head deprel)
+	      tk
+	  (format nil "~a, ~a, ~a, ~a"
+		  id form head deprel)))
+      tks))
+   :filter nil))
+   
+   
+(defun process-pattern-in-sentences (sentences pattern process &key (filter t) )
+  "(list-of sentences) -> (sentence -> (list-of (list-of tokens))) -> ((list-of tokens) -> X) -> (list-of (list-of X))
+
+   In each sentence in SENTENCES, search for lists of tokens
+   satisfying PATTERN. Then, applies PROCESS in each list.
+   
+   If FILTER, removes nil results."
+  ;; TODO: change (sentence -> (list-of (list-of tokens)))
+  ;; to (sentence -> (sentence, (list-of (list-of tokens))))
+  ;; and from (list-of (list-of X))
+  ;; to (sentence, (list-of (list-of X)))
+  ;; in order to make clear from which sentence the list came
+  ;; or perhaps type could change with flag?
+  (funcall
+   (if filter
+       #'(lambda (x) (remove nil x))
+       #'identity)
+   (mapcar
+    (lambda (sentence)
+      (mapcar
+       process
+       (pattern-in-sentences sentence pattern)))
+    sentences)))
+
+(defun pattern-in-sentences (sentence pattern)
+  "sentence -> (sentence -> (list-of (list-of tokens))) -> (list-of (list-of tokens))"
+  (funcall pattern sentence))
+ 
+  
 (defun flatten-names-in-sentences (sentences name-list)
   (mapcar
    #'(lambda (sentence)
