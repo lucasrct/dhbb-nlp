@@ -1,5 +1,5 @@
 (ql:quickload :cl-conllu)
-(ql:quickload :rcl)
+;; (ql:quickload :rcl)
 ;; (ql:quickload :cl-string-match)
 
 (in-package :cl-conllu)
@@ -23,25 +23,21 @@
 ;; 		  (directory #P"../udp/100*.conllu")
 ;; 		  :initial-value nil)))
 
-(defun names-from-list (sentences name-list &key (include-token-range t))
+(defun names-from-list (sentences name-list)
   "Finds and exhibit names from NAMES-LIST found in sentences elements
-of SENTENCES."
-  (if include-token-range
-      (mapcar
-       #'include-token-range
-       sentences))
+   of SENTENCES.
+   NAMES-LIST is a list of names, where each name is a list
+   of strings (tokenized names).
+
+   Output is a list of pairs (sentence . found-names-list),
+   where found-names-list's elements are tokens found that
+   correspond to a name."
   (process-pattern-in-sentences
    sentences
    #'(lambda (sentence)
-       (mapcar
-	#'(lambda (name-range)
-	    (string-range-to-token-list
-	     sentence
-	     name-range))
-	(filter-names
-	 (find-names-in-sentence
-	  sentence
-	  name-list))))
+       (find-names-in-sentence
+	sentence
+	name-list))
    #'(lambda (tks)
        (mapcar
 	#'(lambda (tk)
@@ -52,12 +48,33 @@ of SENTENCES."
 		      form deprel head id)))
 	tks))
    :filter t))
-   
+
+(defun find-names-in-sentence (sentence name-list)
+  (let ((tokens (sentence-tokens sentence)))
+    (mapcar
+     #'(lambda (pair)
+	 (let ((start (car pair))
+	       (length (cdr pair)))
+	   (subseq tokens
+		   start
+		   (+ start length))))
+     (remove
+      nil
+      (mapcar
+       #'(lambda (name)
+	   (cons
+	    (search name
+		    (mapcar #'token-form
+			    tokens)
+		    :test #'equal)
+	    (length name)))
+       name-list)
+      :key #'car))))
    
 (defun process-pattern-in-sentences (sentences pattern process &key (filter t) )
-  "(list-of sentences) ->
-   (sentence -> (list-of (list-of tokens))) ->
-   ((list-of tokens) -> X) ->
+  "(list-of sentence) ->
+   (sentence -> (list-of (list-of token))) ->
+   ((list-of token) -> X) ->
    (list-of (sentence . list-of X))
 
    In each sentence in SENTENCES, search for lists of tokens
@@ -67,138 +84,171 @@ of SENTENCES."
    If FILTER, removes nil results."
   ;; tentative type, but changed in favor of current one:
   ;; (list-of sentences) -> (sentence -> (list-of (list-of tokens))) -> ((list-of tokens) -> X) -> (list-of (list-of X))
-
+  ;; TODO: to cl-conllu
   (funcall
    (if filter
        #'(lambda (x) (remove nil x :key #'cdr))
        #'identity)
    (mapcar
-    (lambda (sentence)
-      (cons sentence
-	    (mapcar
-	     process
-	     (pattern-in-sentences sentence pattern))))
+    #'(lambda (sentence)
+	(process-pattern-in-sentence
+	 sentence
+	 pattern
+	 process))
     sentences)))
-
-(defun pattern-in-sentences (sentence pattern)
-  "sentence -> (sentence -> (list-of (list-of tokens))) -> (list-of (list-of tokens))"
-  (funcall pattern sentence))
- 
   
-(defun flatten-names-in-sentences (sentences name-list)
-  (mapcar
-   #'(lambda (sentence)
-       (flatten-names-in-sentence sentence name-list))
-   sentences))
+(defun process-pattern-in-sentence (sentence pattern process)
+  "sentence ->
+   (sentence -> (list-of (list-of token))) ->
+   ((list-of token) -> X) ->
+   (sentence . list-of X)
 
-(defun flatten-names-in-sentence (sentence name-list &key (include-ranges t) (ignore-closed-class t))
+   Search for lists of tokens satisfying PATTERN. Then, applies
+   PROCESS in each list. Returned result is a pair
+   (sentence . Result-for-Sentence)."
+  ;; tentative type, but changed in favor of current one:
+  ;; sentence -> (sentence -> (list-of (list-of token))) -> ((list-of token) -> X) -> (list-of (list-of X))
+  ;; that is, I've decided to return the original sentence in order to
+  ;; make it more traceable
+  ;; this can be changed/discussed
+  ;; TODO: to cl-conllu
+
+  (cons sentence
+	(mapcar
+	     process
+	     (pattern-in-sentence sentence pattern))))
+
+(defun pattern-in-sentence (sentence pattern)
+  "sentence ->
+   (sentence -> (list-of (list-of tokens))) ->
+   (list-of (list-of tokens))"
+  (funcall pattern sentence))
+  
+(defun flatten-names-in-sentence (sentence name-list &key (ignore-closed-class t) (flatten-descendants t))
   "Receives one sentence and a list of names.
    NAME-LIST is a list of lists (splitted strings).
    Returns a modified sentence with flattened tokens relative to occurring names.
 
+   If there are descendants that aren't included in the name, they are warned. They are also flattened iff FLATTEN-DESCENDANTS.
+
    'flattened' here means that they form a 'flat:name' subtree"
-  (let* ((sentence
-	  (if include-ranges
-	      (include-token-range sentence)
-	      sentence))
-	 (tokens-found
-	  (remove nil
-		  ;; This is necessary in order to remove (warned)
-		  ;; false positives, which is a problem of searching
-		  ;; by string.
-		  (mapcar
-		   #'(lambda (name-range)
-		       (string-range-to-token-list
-			sentence
-			name-range))
-		   (filter-names
-		    (find-names-in-sentence
-		     sentence
-		     name-list))))))
-    (mapc
-     #'(lambda (token-list)
-	 (flatten token-list :ignore-closed-class ignore-closed-class))
-     tokens-found)
-    sentence))
+  (process-pattern-in-sentence
+   sentence
+   #'(lambda (sentence)
+       (find-names-in-sentence
+	sentence
+	name-list))
+   #'(lambda (token-list)
+       (flatten sentence
+		token-list
+		:ignore-closed-class ignore-closed-class
+		:flatten-descendants flatten-descendants))))
+ 
+(defun get-descendants (sentence token-list)
+  "(sentence, (list-of token)) -> (list-of token)
+   Returns every token in SENTENCE that is descendant of at least one
+   token of TOKEN-LIST.
 
-(defun filter-names (range-list)
-  "Receives a list of (start end) lists, each representing a name in
-the sentence, and removes 'problematic' ones.
+   Order is not guaranteed (that is, results may appear in any order)"
+  ;; TODO: to cl-conllu?
+  (let* ((all-tokens (sentence-tokens sentence))
+	 (adjacency-array (make-array (1+ (length all-tokens)) :initial-element nil))
+	 (visited-array (make-array (1+ (length all-tokens)) :initial-element nil)))
+    ;; position i is a list of ids of tokens whose heads are i
+    (mapcar
+     #'(lambda (tk)
+	 (push tk
+	       (elt adjacency-array
+		    (token-head tk))))
+     all-tokens)
+    ;; (format t "array: ~a~%" adjacency-array)
 
-   Let X and Y be (start end) lists.
-   If X is contained in Y, X will be removed.
-   If there's an overlap between X and Y, neither contains the other
-   and X starts before, then Y will be removed."
-  (labels ((aux (range-list
-		 lower-bound
-		 upper-bound
-		 filtered)
-	     (if
-	      (null range-list)
-	      (reverse filtered)
-	      (let* ((current-interval (first range-list))
-		     (start (first current-interval))
-		     (end (nth 1 current-interval)))
-		;; by construction, starts are sorted, therefore we never
-		;; have (< start upper-bound)
-		(if (= start lower-bound)
-		    (if (<= end upper-bound)
-			;; current-interval is contained in previous one,
-			;; therefore won't be added:
-			(aux (rest range-list)
-			     lower-bound upper-bound filtered)
-			;; current-interval contains previous one,
-			;; therefore the previous one is removed and
-			;; current-interval is inserted and defines new
-			;; bounds:
-			(aux (rest range-list)
-			     start end (cons current-interval (rest filtered))))
-		    ;; else: (> start lower-bound)
-		    (if (< start upper-bound)
-			;; current-interval either is contained or has
-			;; overlap and starts later, therefore won't be
-			;; added:
-			(aux (rest range-list)
-			     lower-bound upper-bound filtered)
-			;; current-interval has no overlap at all, then
-			;; is added and defines new bounds. This is the
-			;; expected non-problematic case:
-			(aux (rest range-list)
-			     start end (cons current-interval filtered))))))))
-    (aux (sort range-list
-	       #'<
-	       :key #'first)
-	 0 0 nil)))
+    ;; I've given up using a recursive approach because I'm using (and
+    ;; changing) an array for visited or non-visited (which is faster
+    ;; and clearer)
+    ;; (labels ((aux (sentence stack found)
+    ;; 	       (if (null stack)
+    ;; 		   found
+    ;; 		   (let* ((explore (first stack))
+    ;; 			  (unvisited-descendants
+    ;; 			   (remove-if
+    ;; 			    #'(lambda (x)
+    ;; 				(member x found :test #'equal :key #'token-id))
+    ;; 			        ;; could be faster with array/vector
+    ;; 			        ;; instead of list
+    ;; 			    (elt adjacency-array explore))))
+    ;; 		     ;; (format t "stack: ~a; found: ~a~%" stack found)
+    ;; 		     (aux sentence
+    ;; 			  (append (mapcar
+    ;; 				   #'token-id
+    ;; 				   unvisited-descendants)
+    ;; 				  (rest stack))
+    ;; 			  (append unvisited-descendants
+    ;; 				  found))))))
+    ;;   (aux sentence
+    ;; 	   (mapcar #'token-id token-list)
+    ;; 	   token-list))))
+    (mapcar
+     #'(lambda (tk)
+	 (setf (elt visited-array
+		    (token-id tk))
+	       t))
+     token-list)
+    (let ((stack (mapcar #'token-id token-list)))
+      (flet ((visited? (tk)
+	       (equal
+		(elt visited-array
+		     (token-id tk))
+		t)))
+	(loop (when (null stack)
+		(return (remove-if-not
+			 #'visited?
+			 all-tokens)))
+	   ;; (format t "stack: ~a; found: ~a~%" stack (remove-if-not
+	   ;; 		 #'visited?
+	   ;; 		 all-tokens))
+	   (let* ((explore (pop stack)) ;; token id
+		  (unvisited-descendants
+		   (mapcar
+		    #'token-id
+		    (remove-if
+		     #'visited?
+		     (elt adjacency-array explore)))))
+	     (setf (elt visited-array explore) t)
+	     (setf stack
+		   (append unvisited-descendants
+			   stack))))))))
+	
+	  
+    
+			  
 
-(defun find-names-in-sentence (sentence name-list)
-  "Returns a list of (start-position end-position) lists, where
-   each such list marks the interval in which a name in NAME-LIST occurrs in the sentence.
-   The positions are relative to the string of the sentence
-   (sentence->text sentence ignore-mtokens t)."
-  (let ((names-string (mapcar
-		       #'list-to-string
-		       name-list))
-	(sent-text (sentence->text sentence :ignore-mtokens t)))
-    (mapcan #'(lambda (n)
-		(mapcar
-		 #'(lambda (start-position)
-		     (list
-		      start-position
-		      (+ start-position
-			 (length n))))
-		 (search-all n sent-text :test #'equal)))
-	    names-string)))
-
-(defun flatten (token-list &key (ignore-closed-class t))
+(defun flatten (sentence token-list &key (ignore-closed-class t) (flatten-descendants t))
   "Receives a list of tokens representing a single name and transforms
 them into a flat:name structure."
-  ;; not flat prepositions/closed class words?
   ;; warning for non contiguous tokens?
-  (let* ((tokens (sort token-list
-		       #'<
-		       :key #'token-id))
-	 (first-token-id (token-id (first tokens))))
-    (dolist (tk (rest tokens))
+  (let* ((tokens (sort
+		  (if flatten-descendants
+		      (get-descendants
+			sentence
+			token-list)
+		      token-list)
+		  #'<
+		  :key #'token-id))
+	 (first-token-id (token-id (first tokens)))
+	 (current-id first-token-id))
+    (dolist (tk (rest tokens) tokens)
+      (progn ;; check if contiguous
+	(incf current-id)
+	;; (break "tk: ~a; curr-id: ~a~%" tk current-id)
+	(when (not (equal (token-id tk)
+			  current-id))
+	  (warn "Non-contiguous tokens are being flattened.
+                 Skipped tokens: ~{~a~^,~}~%"
+		(alexandria:iota
+		 (- (token-id tk)
+		    current-id)
+		 :start current-id))))
       (unless (and ignore-closed-class
 		   (in-closed-class? tk))
 	(setf (token-head tk) first-token-id)
@@ -224,48 +274,6 @@ them into a flat:name structure."
        :test #'equal))))
 
 
-(defun string-range-to-token-list (sentence string-range)
-  "Receives a list STRING-RANGE equal to (START END) corresponding to
-starting and ending position of a name and a sentence.
-   Returns a list of tokens corresponding to this name."
-  (let* ((token-ranges
-	  (mapcar
-	   #'(lambda (tk)
-	       (mapcar #'parse-integer
-		       (coerce
-			(nth-value 1
-				   (cl-ppcre:scan-to-strings
-				    "TokenRange=\(\\d+\)\\:\(\\d+\)"
-				    (token-misc tk)))
-			'list)))
-	   (sentence-tokens sentence)))
-	 (start (first string-range))
-	 (end (nth 1 string-range))
-	 (start-position (position start token-ranges
-				   :key #'(lambda (x) (first x))
-				   :test #'equal))
-	 (end-position (position end token-ranges
-				 :key #'(lambda (x) (nth 1 x))
-				 :test #'equal
-				 :start (if start-position
-					    start-position
-					    0))))
-    (cond
-      ((not start-position)
-       (warn "There's no token starting at position ~a
-This interval doesn't represent a name really occurring in the sentence ~a.
-Sentence text: ~a"
-	     start sentence (sentence-meta-value sentence "text")))
-      ((not end-position)
-       (warn "There's no token ending at position ~a.
-This interval doesn't represent a name really occurring in the sentence ~a.
-Sentence text: ~a"
-	     end sentence (sentence-meta-value sentence "text")))
-      (t
-       (subseq (sentence-tokens sentence)
-	       start-position
-	       (+ 1 end-position))))))
-
 (defun add-to-misc (token string)
   ;; TODO: include in cl-conllu
   (let ((current-misc (token-misc token)))
@@ -281,6 +289,7 @@ Sentence text: ~a"
 
 (defun include-token-range (sentence)
   ;; TODO: include in cl-conllu
+  ;; TODO: check if consistent with udpipe tokenizer=TokenRange option
   "Receives a sentence and, for each token, includes word range information in the MISC field.
    Its format is TokenRange=A:B, where A is the start position and B the end position.
    These positions are relative to the text string of the sentence constituted by tokenized words."
@@ -311,14 +320,6 @@ Sentence text: ~a"
 			     end))
 	(setf scan-point end)))))
 
-(defun list-to-string (alist)
-  "Receives a list of strings and return them concatenate separated by spaces."
-  (reduce
-   #'(lambda (x y)
-       (concatenate 'string x " " y))
-   alist))
-
-;; Util
 (defun search-all (sequence-1 sequence-2 &key from-end (test #'equal) test-not key (start1 0) (start2 0) end1 end2)
   "Finds every match of sequence-1 in sequence-2."
   (let ((n (length sequence-1)))
@@ -376,6 +377,14 @@ Sentence text: ~a"
 
 ;; problems in the misc field
 
+(defun list-to-string (alist)
+  "Receives a list of strings and return them concatenate separated by spaces."
+  (reduce
+   #'(lambda (x y)
+       (concatenate 'string x " " y))
+   alist))
+
+;; Util
 (defun fix-sentence (s)
   (dolist (alist (list (sentence-tokens s) (sentence-mtokens s)) s)
     (dolist (tk alist)
